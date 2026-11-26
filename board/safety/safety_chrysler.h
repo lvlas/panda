@@ -28,6 +28,24 @@ const SteeringLimits CHRYSLER_RAM_HD_STEERING_LIMITS = {
   .type = TorqueMotorLimited,
 };
 
+// Trackhawk / WK2 Direct OP Longitudinal hardware safety limits on DAS_3 (0x1F4)
+// ACC_DECEL: raw * 0.004885 - 16 -> [-3.5, +2.0] m/s^2 => [2558, 3685]
+// ENGINE_TORQUE_REQUEST: raw * 0.25 - 500 -> [-500, +600] Nm => [0, 4400]
+const int CHRYSLER_LONG_MIN_ACCEL = 2558;
+const int CHRYSLER_LONG_MAX_ACCEL = 3685;
+const int CHRYSLER_LONG_MIN_GAS = 0;
+const int CHRYSLER_LONG_MAX_GAS = 4400;
+
+enum {
+  CHRYSLER_BTN_NONE = 0,
+  CHRYSLER_BTN_CANCEL = 1,
+  CHRYSLER_BTN_ACCEL = 4,
+  CHRYSLER_BTN_DECEL = 8,
+  CHRYSLER_BTN_RESUME = 16,
+};
+
+bool chrysler_longitudinal = false;
+
 typedef struct {
   const int EPS_2;
   const int ESP_1;
@@ -53,8 +71,8 @@ const ChryslerAddrs CHRYSLER_ADDRS = {
   .ESP_1            = 0x140,  // Brake pedal and vehicle speed
   .ESP_8            = 0x11C,  // Brake pedal and vehicle speed
   .ECM_5            = 0x22F,  // Throttle position sensor
-  .DAS_3            = 0x1F4,  // ACC engagement states from DASM
-  .DAS_6            = 0x2A6,  // LKAS HUD and auto headlight control from DASM
+  .DAS_3            = 0x1F4,  // ACC engagement states / OP long control
+  .DAS_6            = 0x2A6,  // LKAS HUD and WP APA steer_type
   .LKAS_COMMAND     = 0x292,  // LKAS controls from DASM
   .CRUISE_BUTTONS   = 0x23B,  // Cruise control buttons
 };
@@ -69,14 +87,14 @@ const ChryslerAddrs CHRYSLER_ADDRS = {
 #define CHRYSLER_RAM_DT_ADDRS_LKAS_COMMAND   0xA6
 #define CHRYSLER_RAM_DT_ADDRS_CRUISE_BUTTONS 0xB1
 const ChryslerAddrs CHRYSLER_RAM_DT_ADDRS = {
-  .EPS_2            = 0x31,   // EPS driver input torque
-  .ESP_1            = 0x83,   // Brake pedal and vehicle speed
-  .ESP_8            = 0x79,   // Brake pedal and vehicle speed
-  .ECM_5            = 0x9D,   // Throttle position sensor
-  .DAS_3            = 0x99,   // ACC engagement states from DASM
-  .DAS_6            = 0xFA,   // LKAS HUD and auto headlight control from DASM
-  .LKAS_COMMAND     = 0xA6,   // LKAS controls from DASM
-  .CRUISE_BUTTONS   = 0xB1,   // Cruise control buttons
+  .EPS_2            = 0x31,
+  .ESP_1            = 0x83,
+  .ESP_8            = 0x79,
+  .ECM_5            = 0x9D,
+  .DAS_3            = 0x99,
+  .DAS_6            = 0xFA,
+  .LKAS_COMMAND     = 0xA6,
+  .CRUISE_BUTTONS   = 0xB1,
 };
 
 // CAN messages for the 5th gen RAM HD platform
@@ -89,20 +107,27 @@ const ChryslerAddrs CHRYSLER_RAM_DT_ADDRS = {
 #define CHRYSLER_RAM_HD_ADDRS_LKAS_COMMAND   0x276
 #define CHRYSLER_RAM_HD_ADDRS_CRUISE_BUTTONS 0x23A
 const ChryslerAddrs CHRYSLER_RAM_HD_ADDRS = {
-  .EPS_2            = 0x220,  // EPS driver input torque
-  .ESP_1            = 0x140,  // Brake pedal and vehicle speed
-  .ESP_8            = 0x11C,  // Brake pedal and vehicle speed
-  .ECM_5            = 0x22F,  // Throttle position sensor
-  .DAS_3            = 0x1F4,  // ACC engagement states from DASM
-  .DAS_6            = 0x275,  // LKAS HUD and auto headlight control from DASM
-  .LKAS_COMMAND     = 0x276,  // LKAS controls from DASM
-  .CRUISE_BUTTONS   = 0x23A,  // Cruise control buttons
+  .EPS_2            = 0x220,
+  .ESP_1            = 0x140,
+  .ESP_8            = 0x11C,
+  .ECM_5            = 0x22F,
+  .DAS_3            = 0x1F4,
+  .DAS_6            = 0x275,
+  .LKAS_COMMAND     = 0x276,
+  .CRUISE_BUTTONS   = 0x23A,
 };
 
 const CanMsg CHRYSLER_TX_MSGS[] = {
   {CHRYSLER_ADDRS_CRUISE_BUTTONS, 0, 3},
   {CHRYSLER_ADDRS_LKAS_COMMAND, 0, 6},
   {CHRYSLER_ADDRS_DAS_6, 0, 8},
+};
+
+const CanMsg CHRYSLER_LONG_TX_MSGS[] = {
+  {CHRYSLER_ADDRS_CRUISE_BUTTONS, 0, 3},
+  {CHRYSLER_ADDRS_LKAS_COMMAND, 0, 6},
+  {CHRYSLER_ADDRS_DAS_6, 0, 8},
+  {CHRYSLER_ADDRS_DAS_3, 0, 8},
 };
 
 const CanMsg CHRYSLER_RAM_DT_TX_MSGS[] = {
@@ -120,10 +145,17 @@ const CanMsg CHRYSLER_RAM_HD_TX_MSGS[] = {
 RxCheck chrysler_rx_checks[] = {
   {.msg = {{CHRYSLER_ADDRS_EPS_2, 0, 8, .check_checksum = true, .max_counter = 15U, .frequency = 100U}, { 0 }, { 0 }}},
   {.msg = {{CHRYSLER_ADDRS_ESP_1, 0, 8, .check_checksum = true, .max_counter = 15U, .frequency = 50U}, { 0 }, { 0 }}},
-  //{.msg = {{ESP_8, 0, 8, .check_checksum = true, .max_counter = 15U, .frequency = 50U}}},
   {.msg = {{514, 0, 8, .check_checksum = false, .max_counter = 0U, .frequency = 100U}, { 0 }, { 0 }}},
   {.msg = {{CHRYSLER_ADDRS_ECM_5, 0, 8, .check_checksum = true, .max_counter = 15U, .frequency = 50U}, { 0 }, { 0 }}},
   {.msg = {{CHRYSLER_ADDRS_DAS_3, 0, 8, .check_checksum = true, .max_counter = 15U, .frequency = 50U}, { 0 }, { 0 }}},
+};
+
+RxCheck chrysler_long_rx_checks[] = {
+  {.msg = {{CHRYSLER_ADDRS_EPS_2, 0, 8, .check_checksum = true, .max_counter = 15U, .frequency = 100U}, { 0 }, { 0 }}},
+  {.msg = {{CHRYSLER_ADDRS_ESP_1, 0, 8, .check_checksum = true, .max_counter = 15U, .frequency = 50U}, { 0 }, { 0 }}},
+  {.msg = {{514, 0, 8, .check_checksum = false, .max_counter = 0U, .frequency = 100U}, { 0 }, { 0 }}},
+  {.msg = {{CHRYSLER_ADDRS_ECM_5, 0, 8, .check_checksum = true, .max_counter = 15U, .frequency = 50U}, { 0 }, { 0 }}},
+  {.msg = {{CHRYSLER_ADDRS_CRUISE_BUTTONS, 0, 3, .check_checksum = true, .max_counter = 15U, .frequency = 50U}, { 0 }, { 0 }}},
 };
 
 RxCheck chrysler_ram_dt_rx_checks[] = {
@@ -142,10 +174,9 @@ RxCheck chrysler_ram_hd_rx_checks[] = {
   {.msg = {{CHRYSLER_RAM_HD_ADDRS_DAS_3, 2, 8, .check_checksum = true, .max_counter = 15U, .frequency = 50U}, { 0 }, { 0 }}},
 };
 
-
-
-const uint32_t CHRYSLER_PARAM_RAM_DT = 1U;  // set for Ram DT platform
-const uint32_t CHRYSLER_PARAM_RAM_HD = 2U;  // set for Ram HD platform
+const uint32_t CHRYSLER_PARAM_RAM_DT = 1U;
+const uint32_t CHRYSLER_PARAM_RAM_HD = 2U;
+const uint32_t CHRYSLER_PARAM_LONGITUDINAL = 4U;
 
 enum {
   CHRYSLER_RAM_DT,
@@ -160,8 +191,6 @@ static uint32_t chrysler_get_checksum(CANPacket_t *to_push) {
 }
 
 static uint32_t chrysler_compute_checksum(CANPacket_t *to_push) {
-  // TODO: clean this up
-  // http://illmatics.com/Remote%20Car%20Hacking.pdf
   uint8_t checksum = 0xFFU;
   int len = GET_LEN(to_push);
   for (int j = 0; j < (len - 1); j++) {
@@ -193,12 +222,38 @@ static uint32_t chrysler_compute_checksum(CANPacket_t *to_push) {
 }
 
 static uint8_t chrysler_get_counter(CANPacket_t *to_push) {
-  return (uint8_t)(GET_BYTE(to_push, 6) >> 4);
+  int counter_byte = GET_LEN(to_push) - 2U;
+  return (uint8_t)(GET_BYTE(to_push, counter_byte) >> 4);
 }
 
 static void chrysler_rx_hook(CANPacket_t *to_push) {
   const int bus = GET_BUS(to_push);
   const int addr = GET_ADDR(to_push);
+
+  // OP Longitudinal engage/disengage via steering wheel cruise buttons
+  if ((bus == 0) && (addr == chrysler_addrs->CRUISE_BUTTONS) && chrysler_longitudinal) {
+    int cruise_button = GET_BIT(to_push, 0U);  // ACC_Cancel
+    if (!cruise_button) {
+      cruise_button |= GET_BIT(to_push, 2U) << 2U;  // ACC_Accel
+      cruise_button |= GET_BIT(to_push, 3U) << 3U;  // ACC_Decel
+      cruise_button |= GET_BIT(to_push, 4U) << 4U;  // ACC_Resume
+    }
+
+    // Enter controls on falling edge of accel/decel/resume
+    bool accel = (cruise_button != CHRYSLER_BTN_ACCEL) && (cruise_button_prev == CHRYSLER_BTN_ACCEL);
+    bool decel = (cruise_button != CHRYSLER_BTN_DECEL) && (cruise_button_prev == CHRYSLER_BTN_DECEL);
+    bool resume = (cruise_button != CHRYSLER_BTN_RESUME) && (cruise_button_prev == CHRYSLER_BTN_RESUME);
+    if (accel || decel || resume) {
+      controls_allowed = true;
+    }
+
+    // Exit controls immediately on cancel press
+    if (cruise_button == CHRYSLER_BTN_CANCEL) {
+      controls_allowed = false;
+    }
+
+    cruise_button_prev = cruise_button;
+  }
 
   // Measured EPS torque
   if ((bus == 0) && (addr == chrysler_addrs->EPS_2)) {
@@ -206,14 +261,15 @@ static void chrysler_rx_hook(CANPacket_t *to_push) {
     update_sample(&torque_meas, torque_meas_new);
   }
 
-  // enter controls on rising edge of ACC, exit controls on ACC off
-  const int das_3_bus = (chrysler_platform == CHRYSLER_PACIFICA) ? 0 : 2;
-  if ((bus == das_3_bus) && (addr == chrysler_addrs->DAS_3)) {
-    bool cruise_engaged = GET_BIT(to_push, 21U) == 1U;
-    pcm_cruise_check(cruise_engaged);
+  // Stock ACC engagement tracking when OP longitudinal is disabled
+  if (!chrysler_longitudinal) {
+    const int das_3_bus = (chrysler_platform == CHRYSLER_PACIFICA) ? 0 : 2;
+    if ((bus == das_3_bus) && (addr == chrysler_addrs->DAS_3)) {
+      bool cruise_engaged = GET_BIT(to_push, 21U) == 1U;
+      pcm_cruise_check(cruise_engaged);
+    }
   }
 
-  // TODO: use the same message for both
   // update vehicle moving
   if ((chrysler_platform != CHRYSLER_PACIFICA) && (bus == 0) && (addr == chrysler_addrs->ESP_8)) {
     vehicle_moving = ((GET_BYTE(to_push, 4) << 8) + GET_BYTE(to_push, 5)) != 0U;
@@ -256,7 +312,26 @@ static bool chrysler_tx_hook(CANPacket_t *to_send) {
     }
   }
 
-  // FORCE CANCEL: only the cancel button press is allowed
+  // DIRECT OP LONGITUDINAL (DAS_3 / 0x1F4)
+  if (tx && (addr == chrysler_addrs->DAS_3)) {
+    if (!chrysler_longitudinal || !controls_allowed) {
+      tx = false;
+    } else {
+      bool gas_req = GET_BIT(to_send, 7U) != 0U;
+      int gas_raw = ((GET_BYTE(to_send, 0) & 0x1FU) << 8) | GET_BYTE(to_send, 1);
+      bool decel_req = ((GET_BYTE(to_send, 4) >> 4) & 0x7U) != 0U;
+      int accel_raw = ((GET_BYTE(to_send, 2) & 0xFU) << 8) | GET_BYTE(to_send, 3);
+
+      if (gas_req && (gas_pressed_prev || max_limit_check(gas_raw, CHRYSLER_LONG_MAX_GAS, CHRYSLER_LONG_MIN_GAS))) {
+        tx = false;
+      }
+      if (decel_req && max_limit_check(accel_raw, CHRYSLER_LONG_MAX_ACCEL, CHRYSLER_LONG_MIN_ACCEL)) {
+        tx = false;
+      }
+    }
+  }
+
+  // FORCE CANCEL: only the cancel/resume button press is allowed
   if (addr == chrysler_addrs->CRUISE_BUTTONS) {
     const bool is_cancel = GET_BYTE(to_send, 0) == 1U;
     const bool is_resume = GET_BYTE(to_send, 0) == 0x10U;
@@ -287,6 +362,8 @@ static int chrysler_fwd_hook(int bus_num, int addr) {
 }
 
 static safety_config chrysler_init(uint16_t param) {
+  chrysler_longitudinal = GET_FLAG(param, CHRYSLER_PARAM_LONGITUDINAL);
+
   safety_config ret;
   if (GET_FLAG(param, CHRYSLER_PARAM_RAM_DT)) {
     chrysler_platform = CHRYSLER_RAM_DT;
@@ -301,7 +378,11 @@ static safety_config chrysler_init(uint16_t param) {
   } else {
     chrysler_platform = CHRYSLER_PACIFICA;
     chrysler_addrs = &CHRYSLER_ADDRS;
-    ret = BUILD_SAFETY_CFG(chrysler_rx_checks, CHRYSLER_TX_MSGS);
+    if (chrysler_longitudinal) {
+      ret = BUILD_SAFETY_CFG(chrysler_long_rx_checks, CHRYSLER_LONG_TX_MSGS);
+    } else {
+      ret = BUILD_SAFETY_CFG(chrysler_rx_checks, CHRYSLER_TX_MSGS);
+    }
   }
   return ret;
 }

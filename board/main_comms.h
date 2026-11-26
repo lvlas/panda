@@ -33,7 +33,7 @@ int get_health_pkt(void *dat) {
   health->spi_checksum_error_count = spi_checksum_error_count;
 
   health->fault_status_pkt = fault_status;
-  health->faults_pkt = faults;
+  health->faults_pkt = faults & 0x007FFFFFU;
 
   health->interrupt_load = interrupt_load;
 
